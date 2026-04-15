@@ -149,6 +149,40 @@ SOCKET open_socket_unix(const char* path, mode_t access) {
 int traceLevel = 2 /* NORMAL */;
 bool useSyslog = false, syslog_opened = false, useSystemd = false;
 
+/* Monotonic time source: if system clock is near epoch (broken RTC),
+ * return seconds elapsed since first call instead of wall-clock time.
+ * This ensures all timeout logic works correctly on systems without NTP. */
+time_t n2n_now(void) {
+    time_t now = time(NULL);
+    if (now >= 1000) return now; /* clock is fine */
+
+    /* Clock not set: use POSIX clock_gettime for monotonic time if available,
+     * otherwise fall back to clock() which is always monotonic. */
+#if defined(_WIN32)
+    {
+        static ULONGLONG first_tick = 0;
+        ULONGLONG tick = GetTickCount64();
+        if (first_tick == 0) first_tick = tick;
+        return 1000 + (time_t)((tick - first_tick) / 1000ULL);
+    }
+#elif defined(CLOCK_MONOTONIC)
+    {
+        struct timespec ts;
+        static time_t first_mono = 0;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        if (first_mono == 0) first_mono = ts.tv_sec;
+        return 1000 + (ts.tv_sec - first_mono);
+    }
+#else
+    {
+        static clock_t first_clk = 0;
+        clock_t clk = clock();
+        if (first_clk == 0) first_clk = clk;
+        return 1000 + (time_t)((clk - first_clk) / CLOCKS_PER_SEC);
+    }
+#endif
+}
+
 #define N2N_TRACE_DATESIZE 32
 void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
     va_list va_ap;
@@ -159,13 +193,7 @@ void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
         char theDate[N2N_TRACE_DATESIZE];
         char *extra_msg = "";
         time_t theTime = time(NULL);
-        size_t i;
-
-        /* We have two paths - one if we're logging, one if we aren't
-        *   Note that the no-log case is those systems which don't support it (WIN32),
-        *                                those without the headers !defined(USE_SYSLOG)
-        *                                those where it's parametrically off...
-        */
+        int i;
 
         memset(buf, 0, sizeof(buf));
 
@@ -173,12 +201,10 @@ void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
         vsnprintf(buf, sizeof(buf)-1, format, va_ap);
         va_end(va_ap);
 
-        if(eventTraceLevel == 0 /* TRACE_ERROR */)
-        extra_msg = "ERROR: ";
-        else if(eventTraceLevel == 1 /* TRACE_WARNING */)
-        extra_msg = "WARNING: ";
+        if(eventTraceLevel == 0) extra_msg = "ERROR: ";
+        else if(eventTraceLevel == 1) extra_msg = "WARNING: ";
 
-        while(buf[strlen(buf)-1] == '\n') buf[strlen(buf)-1] = '\0';
+        while(strlen(buf) > 0 && buf[strlen(buf)-1] == '\n') buf[strlen(buf)-1] = '\0';
 
 #ifndef _WIN32
         if(useSyslog) {
@@ -186,15 +212,18 @@ void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
                 openlog("n2n", LOG_PID, LOG_DAEMON);
                 syslog_opened = 1;
             }
-
             snprintf(out_buf, sizeof(out_buf), "%s%s", extra_msg, buf);
             syslog(LOG_INFO, "%s", out_buf);
         } else {
             if (useSystemd)
                 snprintf(out_buf, sizeof(out_buf), "%s%s", extra_msg, buf);
             else {
-                strftime(theDate, N2N_TRACE_DATESIZE, "%d/%b/%Y %H:%M:%S", localtime(&theTime));
-                for(i=strlen(file)-1; i>0; i--) if(file[i] == '/') { i++; break; };
+                struct tm *tm_info = localtime(&theTime);
+                if (tm_info)
+                    strftime(theDate, N2N_TRACE_DATESIZE, "%d/%b/%Y %H:%M:%S", tm_info);
+                else
+                    strncpy(theDate, "01/Jan/1970 00:00:00", N2N_TRACE_DATESIZE);
+                for(i=(int)strlen(file)-1; i>0; i--) if(file[i] == '/') { i++; break; };
                 snprintf(out_buf, sizeof(out_buf), "%s [%15s:%4d] %s%s", theDate, &file[i], line, extra_msg, buf);
             }
             printf("%s\n", out_buf);
@@ -204,7 +233,7 @@ void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
         if (event_log == INVALID_HANDLE_VALUE) {
             /* running in the console */
             strftime(theDate, N2N_TRACE_DATESIZE, "%d/%b/%Y %H:%M:%S", localtime(&theTime));
-            for(i=strlen(file)-1; i>0; i--) if(file[i] == '\\') { i++; break; };
+            for(i=(int)strlen(file)-1; i>0; i--) if(file[i] == '\\') { i++; break; };
             snprintf(out_buf, sizeof(out_buf), "%s [%15s:%4d] %s%s", theDate, &file[i], line, extra_msg, buf);
             printf("%s\n", out_buf);
             fflush(stdout);

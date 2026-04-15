@@ -544,75 +544,6 @@ static int try_broadcast( n2n_sn_t * sss,
 
 
 /* Test connectivity by attempting a non-blocking connect to a well-known address */
-static int test_connectivity(int family, const char *addr_str)
-{
-#ifdef _WIN32
-    SOCKET sock = socket(family, SOCK_DGRAM, 0);
-    if (sock == INVALID_SOCKET) return 0;
-    u_long mode = 1;
-    ioctlsocket(sock, FIONBIO, &mode);
-#else
-    int sock = socket(family, SOCK_DGRAM, 0);
-    if (sock < 0) return 0;
-    fcntl(sock, F_SETFL, O_NONBLOCK);
-#endif
-
-    struct sockaddr_storage test_addr;
-    socklen_t addr_len;
-    memset(&test_addr, 0, sizeof(test_addr));
-
-    if (family == AF_INET) {
-        struct sockaddr_in *a = (struct sockaddr_in *)&test_addr;
-        a->sin_family = AF_INET;
-        a->sin_port = htons(53);
-        inet_pton(AF_INET, addr_str, &a->sin_addr);
-        addr_len = sizeof(struct sockaddr_in);
-    } else {
-        struct sockaddr_in6 *a = (struct sockaddr_in6 *)&test_addr;
-        a->sin6_family = AF_INET6;
-        a->sin6_port = htons(53);
-        inet_pton(AF_INET6, addr_str, &a->sin6_addr);
-        addr_len = sizeof(struct sockaddr_in6);
-    }
-
-    int connect_result = connect(sock, (struct sockaddr*)&test_addr, addr_len);
-
-#ifdef _WIN32
-    if (connect_result == 0) { closesocket(sock); return 1; }
-    if (WSAGetLastError() != WSAEWOULDBLOCK) { closesocket(sock); return 0; }
-#else
-    if (connect_result == 0) { close(sock); return 1; }
-    if (errno != EINPROGRESS) { close(sock); return 0; }
-#endif
-
-    fd_set write_fds;
-    struct timeval timeout = {1, 0};
-    FD_ZERO(&write_fds);
-    FD_SET(sock, &write_fds);
-
-    int result = select(sock + 1, NULL, &write_fds, NULL, &timeout);
-    int ret = 0;
-    if (result > 0) {
-        int error = 0;
-        socklen_t len = sizeof(error);
-#ifdef _WIN32
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
-#else
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len);
-#endif
-        ret = (error == 0);
-    }
-#ifdef _WIN32
-    closesocket(sock);
-#else
-    close(sock);
-#endif
-    return ret;
-}
-
-static int test_ipv4_connectivity() { return test_connectivity(AF_INET,  "8.8.8.8"); }
-static int test_ipv6_connectivity() { return test_connectivity(AF_INET6, "2001:4860:4860::8888"); }
-
 /** Initialise the supernode structure */
 static int init_sn( n2n_sn_t * sss )
 {
@@ -1557,7 +1488,7 @@ static int process_udp( n2n_sn_t * sss,
         n2n_DEREGISTER_t dereg;
         decode_DEREGISTER( &dereg, &cmn, udp_buf, &rem, &idx );
 
-        traceEvent( TRACE_INFO, "Rx DEREGISTER from %s", macaddr_str((char[N2N_MACSTR_SIZE]){0}, dereg.srcMac) );
+        traceEvent( TRACE_INFO, "Rx DEREGISTER from %s", macaddr_str(mac_buf, dereg.srcMac) );
 
         struct peer_info *prev = NULL, *scan = sss->edges;
         while (scan) {
@@ -1578,7 +1509,7 @@ static int process_udp( n2n_sn_t * sss,
         n2n_PROBE_ACK_t ack;
         decode_PROBE_ACK(&ack, &cmn, udp_buf, &rem, &idx);
 
-        traceEvent(TRACE_DEBUG, "Rx PROBE_ACK: forward to %s", macaddr_str((char[N2N_MACSTR_SIZE]){0}, ack.srcMac));
+        traceEvent(TRACE_DEBUG, "Rx PROBE_ACK: forward to %s", macaddr_str(mac_buf, ack.srcMac));
         try_forward(sss, &cmn, ack.srcMac, udp_buf, udp_size);
     }
     else if ( msg_type == n2n_query_peer )
@@ -1651,7 +1582,7 @@ static int process_udp( n2n_sn_t * sss,
                     socklen_t slen2 = (target->sockets[0].family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
                     sendto( send_sock2, encbuf2, encx2, 0, (struct sockaddr*)&b_addr, slen2 );
                     traceEvent(TRACE_DEBUG, "Simultaneous open: pushed A's addr to B for %s",
-                               macaddr_str((char[N2N_MACSTR_SIZE]){0}, query.targetMac));
+                               macaddr_str(mac_buf, query.targetMac));
                 }
             }
         }
@@ -1734,8 +1665,8 @@ static int process_udp( n2n_sn_t * sss,
         encode_REGISTER_SUPER_ACK( ackbuf, &encx, &cmn2, &ack );
 
 		      /* Select the correct socket based on the address family */
-		      volatile SOCKET send_sock = (sender_sock->sa_family == AF_INET6) ? sss->sock6 : sss->sock;
-	      	volatile socklen_t sock_len = (sender_sock->sa_family == AF_INET6) ?
+		      SOCKET send_sock = (sender_sock->sa_family == AF_INET6) ? sss->sock6 : sss->sock;
+	      	socklen_t sock_len = (sender_sock->sa_family == AF_INET6) ?
                            sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
 
 	      	sendto( send_sock, ackbuf, encx, 0,
@@ -1810,7 +1741,7 @@ static int process_udp( n2n_sn_t * sss,
                     {
                         struct sockaddr_storage peer_sa;
                         socklen_t peer_sa_len;
-                        volatile SOCKET peer_sock;
+                        SOCKET peer_sock;
 
                         if (p->sock.family == AF_INET6) {
                             struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&peer_sa;
@@ -1991,19 +1922,13 @@ int main( int argc, char * const argv[] )
         }
     }
 
-    /* Verify actual connectivity */
-    if (ipv4_available && test_ipv4_connectivity()) {
-        traceEvent( TRACE_NORMAL, "IPv4 connectivity confirmed" );
-    } else if (ipv4_available) {
-        traceEvent( TRACE_WARNING, "IPv4 socket available but no external connectivity" );
-        ipv4_available = 0;
+    /* Socket bind success is sufficient to confirm availability */
+    if (ipv4_available) {
+        traceEvent( TRACE_NORMAL, "IPv4 socket ready" );
     }
 
-    if (ipv6_available && test_ipv6_connectivity()) {
-        traceEvent( TRACE_NORMAL, "IPv6 connectivity confirmed" );
-    } else if (ipv6_available) {
-        traceEvent( TRACE_WARNING, "IPv6 socket available but no external connectivity" );
-        ipv6_available = 0;
+    if (ipv6_available) {
+        traceEvent( TRACE_NORMAL, "IPv6 socket ready" );
     }
 
     /* At least one socket must be available */
