@@ -91,6 +91,7 @@ struct n2n_edge
     uint8_t             re_resolve_supernode_ip;
 
     n2n_sock_t          supernode;
+    n2n_sock_t          supernode_alt;          /**< Alternate address family for supernode (family=0 if unavailable) */
 
     size_t              sn_idx;                 /**< Currently active supernode. */
     size_t              sn_num;                 /**< Number of supernode addresses defined. */
@@ -126,6 +127,7 @@ struct n2n_edge
     time_t              last_sup;               /**< Last time a packet arrived from supernode. */
     size_t              sup_attempts;           /**< Number of remaining attempts to this supernode. */
     n2n_cookie_t        last_cookie;            /**< Cookie sent in last REGISTER_SUPER. */
+    uint8_t             sn_ack_count;           /**< Number of REGISTER_SUPER_ACKs received for current cookie (dual-stack sends 2) */
     uint8_t             sn_ipv4_support;        /**< Supernode IPv4 support capability */
     uint8_t             sn_ipv6_support;        /**< Supernode IPv6 support capability */
 
@@ -731,7 +733,10 @@ static void send_register_super( n2n_edge_t * eee,
     cmn.flags = 0;
     memcpy( cmn.community, eee->community_name, N2N_COMMUNITY_SIZE );
 
+    /* Generate cookie once; both primary and alt address use the same cookie
+     * so both ACKs pass the cookie check and neither triggers a spurious warning. */
     random_bytes(NULL, eee->last_cookie, N2N_COOKIE_SIZE);
+    eee->sn_ack_count = 0; /* reset duplicate-ACK counter */
 
     memcpy( reg.cookie, eee->last_cookie, N2N_COOKIE_SIZE );
     reg.auth.scheme=0; /* No auth yet */
@@ -757,6 +762,15 @@ static void send_register_super( n2n_edge_t * eee,
 
     sendto_sock( sock_for_dest(eee, supernode), pktbuf, idx, supernode );
 
+    /* Also register via alternate address family so supernode knows both our addresses */
+    if (eee->supernode_alt.family != 0) {
+        SOCKET alt_sock = (eee->supernode_alt.family == AF_INET6) ? eee->udp_sock6 : eee->udp_sock;
+        if (alt_sock != -1) {
+            traceEvent(TRACE_INFO, "send REGISTER_SUPER (alt) to %s",
+                       sock_to_cstr(sockbuf, &eee->supernode_alt));
+            sendto_sock(alt_sock, pktbuf, idx, &eee->supernode_alt);
+        }
+    }
 }
 
 /** Send a REGISTER_ACK packet to a peer edge. */
@@ -1292,6 +1306,10 @@ void set_peer_operational( n2n_edge_t * eee,
         scan->sock = *peer;
         if (peer->family == AF_INET6)
             scan->sock6 = *peer;
+        else if (scan->sock6.family == 0 && peer->family == AF_INET) {
+            /* sock6 already inherited from pending_peers (set during try_send_register);
+             * only clear it if it was never set. */
+        }
         scan->last_seen = time(NULL);
         scan->punch_start_time = 0;  /* stop punch activity */
         scan->punch_failed = 0;
@@ -1496,6 +1514,14 @@ static void update_supernode_reg( n2n_edge_t * eee, time_t nowTime )
     if(eee->re_resolve_supernode_ip)
     {
         supernode2addr(&(eee->supernode), eee->sn_af, eee->sn_ip_array[eee->sn_idx] );
+
+        /* Re-resolve alternate address family to keep dual-stack in sync */
+        memset(&eee->supernode_alt, 0, sizeof(n2n_sock_t));
+        {
+            int alt_af = (eee->supernode.family == AF_INET6) ? AF_INET : AF_INET6;
+            if (supernode2addr(&eee->supernode_alt, alt_af, eee->sn_ip_array[eee->sn_idx]) != 0)
+                memset(&eee->supernode_alt, 0, sizeof(n2n_sock_t));
+        }
     }
 
     traceEvent(TRACE_DEBUG, "Registering with supernode (%s) (attempts left %u)",
@@ -2506,6 +2532,12 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 {
                     try_send_register(eee, 1, pi.mac, &pi.sockets[0]);
                 }
+                /* After registering, store sock6 in pending_peer so set_peer_operational
+                 * can inherit it when the peer becomes known. */
+                if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6) {
+                    struct peer_info *pp = find_peer_by_mac(eee->pending_peers, pi.mac);
+                    if (pp) pp->sock6 = pi.sock6;
+                }
             } else if (sock_equal(&known->sock, &pi.sockets[0]) != 0) {
                 /* Check if known->sock is the LAN address matching pi.sockets[1] */
                 int lan_match = (pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
@@ -2552,6 +2584,11 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 {
                     try_send_register(eee, 1, pi.mac, &pi.sockets[0]);
                 }
+                /* Store sock6 in pending_peer for re-punch case too */
+                if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6) {
+                    struct peer_info *pp = find_peer_by_mac(eee->pending_peers, pi.mac);
+                    if (pp) pp->sock6 = pi.sock6;
+                }
                 } /* end if (!lan_match) */
             }
             PEERS_UNLOCK(eee);
@@ -2560,7 +2597,7 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
         {
             n2n_REGISTER_SUPER_ACK_t ra;
 
-            if ( eee->sn_wait )
+            if ( eee->sn_wait || eee->sn_ack_count > 0 )
             {
                 decode_REGISTER_SUPER_ACK( &ra, &cmn, udp_buf, &rem, &idx );
 
@@ -2571,12 +2608,17 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
 
                 if ( 0 == memcmp( ra.cookie, eee->last_cookie, N2N_COOKIE_SIZE ) )
                 {
+                    eee->sn_ack_count++;
+
                     if ( ra.num_sn > 0 )
                     {
                         traceEvent(TRACE_DEBUG, "Rx REGISTER_SUPER_ACK backup supernode at %s",
                                    sock_to_cstr(sockbuf1, &(ra.sn_bak) ) );
                     }
 
+                    /* Only do full processing on the first ACK; subsequent ACKs
+                     * (from alt address family) just refresh last_sup silently. */
+                    if ( eee->sn_ack_count == 1 ) {
 					eee->last_sup = now;
 					eee->sn_wait=0;
 					eee->sup_attempts = N2N_EDGE_SUP_ATTEMPTS; /* refresh because we got a response */
@@ -2632,16 +2674,20 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                     /* Store supernode version */
                     strcpy(eee->supernode_version, n2n_sw_version);
 
-                    /* Set IP support based on connection type */
-                    if (eee->supernode.family == AF_INET6) {
-                        eee->sn_ipv6_support = 1;
-                        eee->sn_ipv4_support = 0;
-                    } else {
-                        eee->sn_ipv4_support = 1;
-                        eee->sn_ipv6_support = 0;
-                    }
+                    /* Set IP support flags: primary connection type is always supported;
+                     * if alt address resolved, supernode supports both families. */
+                    eee->sn_ipv4_support = (eee->supernode.family == AF_INET) ? 1 :
+                                           (eee->supernode_alt.family == AF_INET ? 1 : 0);
+                    eee->sn_ipv6_support = (eee->supernode.family == AF_INET6) ? 1 :
+                                           (eee->supernode_alt.family == AF_INET6 ? 1 : 0);
 
                     /* Do NOT clear pending_peers here - hole-punch may be in progress */
+                    } else {
+                        /* Duplicate ACK from alt address family: just refresh last_sup */
+                        eee->last_sup = now;
+                        traceEvent(TRACE_DEBUG, "Rx REGISTER_SUPER_ACK (alt addr, ack#%u) - refreshing last_sup",
+                                   eee->sn_ack_count);
+                    }
                 }
                 else
                 {
@@ -3429,6 +3475,18 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
 #else
         sleep(5);
 #endif
+    }
+
+    /* Resolve alternate address family for dual-stack registration */
+    memset(&eee.supernode_alt, 0, sizeof(n2n_sock_t));
+    {
+        int alt_af = (eee.supernode.family == AF_INET6) ? AF_INET : AF_INET6;
+        if (supernode2addr(&eee.supernode_alt, alt_af, eee.sn_ip_array[eee.sn_idx]) == 0) {
+            traceEvent(TRACE_INFO, "Supernode alt address resolved: %s",
+                       sock_to_cstr((n2n_sock_str_t){0}, &eee.supernode_alt));
+        } else {
+            memset(&eee.supernode_alt, 0, sizeof(n2n_sock_t));
+        }
     }
 
     /* Check if supernode address is a domain name, enable periodic re-resolution */

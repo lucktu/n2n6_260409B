@@ -809,6 +809,21 @@ static int update_edge( n2n_sn_t * sss,
         if ( (0 != memcmp(community, scan->community_name, sizeof(n2n_community_t))) ||
              (0 != sock_equal(sender_sock, &(scan->sock) )) )
         {
+            /* Alt-family registration: only update the other-family address, don't overwrite primary */
+            if (scan->sock.family != 0 && sender_sock->family != scan->sock.family) {
+                if (sender_sock->family == AF_INET6) {
+                    int had_sock6 = (scan->sock6.family == AF_INET6);
+                    memcpy(&scan->sock6, sender_sock, sizeof(n2n_sock_t));
+                    scan->last_seen = now;
+                    /* If sock6 was newly learned, return 1 so peers get a fresh PEER_INFO
+                     * that includes the IPv6 address. */
+                    return had_sock6 ? 0 : 1;
+                }
+                /* IPv4 alt: primary sock already has IPv4 from main registration */
+                scan->last_seen = now;
+                return 0;
+            }
+
             memcpy(scan->community_name, community, sizeof(n2n_community_t) );
             memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
             if (sender_sock->family == AF_INET6)
@@ -1776,6 +1791,13 @@ static int process_udp( n2n_sn_t * sss,
                         pi.sockets[1] = p->sockets[1];
                     } else {
                         pi.aflags = 0;
+                    }
+                    /* Include IPv6 address if available */
+                    if (p->sock6.family == AF_INET6) {
+                        pi.aflags |= N2N_AFLAGS_IPV6_SOCKET;
+                        pi.sock6 = p->sock6;
+                    } else {
+                        memset(&pi.sock6, 0, sizeof(n2n_sock_t));
                     }
                     pix = 0;
                     encode_PEER_INFO(pibuf, &pix, &pi_cmn, &pi);
