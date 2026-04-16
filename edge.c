@@ -3649,8 +3649,9 @@ if (argc > 1 && argv[1][0] != '-' && access(argv[1], R_OK) == 0) {
                     if (!ifa->ifa_addr) continue;
                     if (ifa->ifa_addr->sa_family == AF_INET6) {
                         struct sockaddr_in6 *s6 = (struct sockaddr_in6*)ifa->ifa_addr;
-                        /* skip loopback ::1 */
-                        if (!IN6_IS_ADDR_LOOPBACK(&s6->sin6_addr)) {
+                        /* skip loopback ::1 and link-local fe80:: */
+                        if (!IN6_IS_ADDR_LOOPBACK(&s6->sin6_addr) &&
+                            !IN6_IS_ADDR_LINKLOCAL(&s6->sin6_addr)) {
                             has_ipv6 = 1;
                             break;
                         }
