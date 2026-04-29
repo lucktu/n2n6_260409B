@@ -2937,24 +2937,31 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                     }
                 } else {
                     int changed = 0;
+                    /* Update IPv4 address if valid and different (or new) */
                     if (is_valid_peer_sock(&pi.sockets[0]) &&
-                        pp->sock.family == AF_INET &&
-                        sock_equal(&pp->sock, &pi.sockets[0]) != 0) {
-                        pp->sock = pi.sockets[0];
-                        changed = 1;
+                        pi.sockets[0].family == AF_INET) {
+                        if (pp->sock.family != AF_INET ||
+                            sock_equal(&pp->sock, &pi.sockets[0]) != 0) {
+                            pp->sock = pi.sockets[0];
+                            changed = 1;
+                        }
                     }
-                    if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6 &&
-                        pp->sock6.family == AF_INET6 &&
-                        sock_equal(&pp->sock6, &pi.sock6) != 0) {
-                        pp->sock6 = pi.sock6;
-                        changed = 1;
+                    /* Update IPv6 address if valid and different (or new) */
+                    if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6) {
+                        if (pp->sock6.family != AF_INET6 ||
+                            sock_equal(&pp->sock6, &pi.sock6) != 0) {
+                            pp->sock6 = pi.sock6;
+                            changed = 1;
+                        }
                     }
+                    /* Update LAN address if valid and different */
                     if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
-                        is_valid_lan_sock(&pi.sockets[1]) &&
-                        pp->sock_lan.family == AF_INET &&
-                        sock_equal(&pp->sock_lan, &pi.sockets[1]) != 0) {
-                        pp->sock_lan = pi.sockets[1];
-                        changed = 1;
+                        is_valid_lan_sock(&pi.sockets[1])) {
+                        if (pp->sock_lan.family != AF_INET ||
+                            sock_equal(&pp->sock_lan, &pi.sockets[1]) != 0) {
+                            pp->sock_lan = pi.sockets[1];
+                            changed = 1;
+                        }
                     }
                     if (changed) {
                         pp->punch_start_time = 0;
@@ -2968,21 +2975,23 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 /* Peer already in known_peers - check for address changes */
                 int addr_changed = 0;
 
-                /* Check IPv4 public address change */
+                /* Check IPv4 public address change or new IPv4 address */
                 if (is_valid_peer_sock(&pi.sockets[0]) &&
-                    pi.sockets[0].family == AF_INET &&
-                    known->sock.family == AF_INET &&
-                    sock_equal(&known->sock, &pi.sockets[0]) != 0) {
-                    addr_changed = 1;
+                    pi.sockets[0].family == AF_INET) {
+                    if (known->sock.family != AF_INET ||
+                        sock_equal(&known->sock, &pi.sockets[0]) != 0) {
+                        addr_changed = 1;
+                    }
                 }
 
-                /* Check IPv6 address change */
+                /* Check IPv6 address change or new IPv6 address */
                 if (!addr_changed &&
                     (pi.aflags & N2N_AFLAGS_IPV6_SOCKET) &&
-                    pi.sock6.family == AF_INET6 &&
-                    known->sock6.family == AF_INET6 &&
-                    sock_equal(&known->sock6, &pi.sock6) != 0) {
-                    addr_changed = 1;
+                    pi.sock6.family == AF_INET6) {
+                    if (known->sock6.family != AF_INET6 ||
+                        sock_equal(&known->sock6, &pi.sock6) != 0) {
+                        addr_changed = 1;
+                    }
                 }
 
                 /* For same-NAT peers, also check LAN address change */
@@ -2990,12 +2999,13 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                     eee->my_public_sock.family == AF_INET &&
                     pi.sockets[0].family == AF_INET &&
                     same_public_ip(&eee->my_public_sock, &pi.sockets[0])) {
-                    /* Check LAN address change */
+                    /* Check LAN address change or new LAN address */
                     if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
-                        is_valid_lan_sock(&pi.sockets[1]) &&
-                        known->sock_lan.family == AF_INET &&
-                        sock_equal(&known->sock_lan, &pi.sockets[1]) != 0) {
-                        addr_changed = 1;
+                        is_valid_lan_sock(&pi.sockets[1])) {
+                        if (known->sock_lan.family != AF_INET ||
+                            sock_equal(&known->sock_lan, &pi.sockets[1]) != 0) {
+                            addr_changed = 1;
+                        }
                     }
                 }
 
