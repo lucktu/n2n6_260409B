@@ -2749,7 +2749,13 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 } else if (NULL == scan && pending) {
                     pending->last_seen = n2n_now();
                 } else {
-                    if ( 0 != sock_equal( &scan->sock, orig_sender ) ) {
+                    int addr_changed;
+                    if (orig_sender->family == AF_INET6) {
+                        addr_changed = (0 != sock_equal( &scan->sock6, orig_sender ));
+                    } else {
+                        addr_changed = (0 != sock_equal( &scan->sock, orig_sender ));
+                    }
+                    if (addr_changed) {
                         traceEvent(TRACE_INFO, "Peer %s addr changed, re-punching",
                                    macaddr_str(mac_buf1, reg.srcMac));
                         struct peer_info *prev = NULL, *curr = eee->known_peers;
@@ -2932,17 +2938,20 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 } else {
                     int changed = 0;
                     if (is_valid_peer_sock(&pi.sockets[0]) &&
+                        pp->sock.family == AF_INET &&
                         sock_equal(&pp->sock, &pi.sockets[0]) != 0) {
                         pp->sock = pi.sockets[0];
                         changed = 1;
                     }
                     if ((pi.aflags & N2N_AFLAGS_IPV6_SOCKET) && pi.sock6.family == AF_INET6 &&
+                        pp->sock6.family == AF_INET6 &&
                         sock_equal(&pp->sock6, &pi.sock6) != 0) {
                         pp->sock6 = pi.sock6;
                         changed = 1;
                     }
                     if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
                         is_valid_lan_sock(&pi.sockets[1]) &&
+                        pp->sock_lan.family == AF_INET &&
                         sock_equal(&pp->sock_lan, &pi.sockets[1]) != 0) {
                         pp->sock_lan = pi.sockets[1];
                         changed = 1;
@@ -2959,13 +2968,24 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                 /* Peer already in known_peers - check for address changes */
                 int addr_changed = 0;
 
-                /* Check public address change */
+                /* Check IPv4 public address change */
                 if (is_valid_peer_sock(&pi.sockets[0]) &&
+                    pi.sockets[0].family == AF_INET &&
+                    known->sock.family == AF_INET &&
                     sock_equal(&known->sock, &pi.sockets[0]) != 0) {
                     addr_changed = 1;
                 }
 
-                /* For same-NAT peers, also check LAN address/port change */
+                /* Check IPv6 address change */
+                if (!addr_changed &&
+                    (pi.aflags & N2N_AFLAGS_IPV6_SOCKET) &&
+                    pi.sock6.family == AF_INET6 &&
+                    known->sock6.family == AF_INET6 &&
+                    sock_equal(&known->sock6, &pi.sock6) != 0) {
+                    addr_changed = 1;
+                }
+
+                /* For same-NAT peers, also check LAN address change */
                 if (!addr_changed &&
                     eee->my_public_sock.family == AF_INET &&
                     pi.sockets[0].family == AF_INET &&
@@ -2973,14 +2993,9 @@ static void readFromIPSocket( n2n_edge_t * eee, SOCKET fd )
                     /* Check LAN address change */
                     if ((pi.aflags & N2N_AFLAGS_LOCAL_SOCKET) &&
                         is_valid_lan_sock(&pi.sockets[1]) &&
+                        known->sock_lan.family == AF_INET &&
                         sock_equal(&known->sock_lan, &pi.sockets[1]) != 0) {
                         addr_changed = 1;
-                    }
-                    /* Check port change (same LAN IP but different port) */
-                    if (!addr_changed && known->sock_lan.family != 0) {
-                        if (pi.sockets[0].port != known->sock.port) {
-                            addr_changed = 1;
-                        }
                     }
                 }
 
