@@ -217,6 +217,10 @@ typedef char ipstr_t[INET6_ADDRSTRLEN];
 #define N2N_MACSTR_SIZE 32
 typedef char macstr_t[N2N_MACSTR_SIZE];
 
+#define PEER_STATE_DISCOVERING  0
+#define PEER_STATE_PUNCHING     1
+#define PEER_STATE_DIRECT       2
+
 struct peer_info {
     struct peer_info *  next;
     n2n_community_t     community_name;
@@ -230,20 +234,19 @@ struct peer_info {
     char                version[8];
     char                os_name[16];
     uint32_t            assigned_ip;
-    time_t              punch_start_time;  /* when hole-punch started */
-    uint8_t             punch_failed;      /* 1 = punch failed, using relay */
-    time_t              punch_reset_time;  /* when punch_failed was set, for retry */
+    uint8_t             state;             /* PEER_STATE_DISCOVERING/PUNCHING/DIRECT */
+    time_t              punch_start_time;  /* when current punch attempt started */
+    time_t              last_punch_probe;  /* time last PROBE was sent during hole-punch */
     time_t              last_probe_sent;   /* time last keepalive PROBE was sent */
     uint8_t             keepalive_fails;   /* consecutive keepalive failures */
     time_t              last_query_sent;   /* time last query_peer was sent, for rate-limiting */
-    time_t              last_punch_probe;  /* time last PROBE was sent during hole-punch */
-    uint8_t             punch_retry_count; /* number of full-cycle retries */
-    uint8_t             first_seen;        /* 1 = first real packet logged (P2P or relay) */
-    uint8_t             last_was_relay;    /* 1 = last packet was via relay (for state change detection) */
+    time_t              last_p2p;          /* last time direct P2P data was received */
+    uint8_t             punch_confirmed;   /* 1 = direct connection confirmed */
+    uint8_t             first_seen;        /* 1 = first real packet logged */
+    uint8_t             last_was_relay;    /* 1 = last packet was via relay */
     time_t              lan_punch_start;   /* when LAN punch started */
     uint8_t             lan_punch_done;    /* 1 = LAN punch done (success or timeout) */
-    time_t              last_p2p;          /* last time direct P2P data was received */
-    uint8_t             punch_confirmed;   /* 1 = direct connection confirmed by P2P packet */
+    time_t              punch_retry_time;  /* next time to retry punch after failure */
 };
 
 struct n2n_edge; /* defined in edge.c */
