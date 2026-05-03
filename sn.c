@@ -21,7 +21,6 @@
 #else
 #include <sys/select.h>
 #include <arpa/inet.h>
-#include <netinet/in.h>
 #define SOCKET_INVALID -1
 #define CLOSE_SOCKET(s) close(s)
 #endif
@@ -703,14 +702,12 @@ static int update_edge( n2n_sn_t * sss,
 
         memcpy(scan->community_name, community, sizeof(n2n_community_t) );
         memcpy(&(scan->mac_addr), edgeMac, sizeof(n2n_mac_t));
-        /* Store address in the correct slot based on family */
-        if (sender_sock->family == AF_INET6) {
-            memset(&(scan->sock), 0, sizeof(n2n_sock_t));  /* No IPv4 yet */
+        memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
+        /* Also record in the appropriate typed slot */
+        if (sender_sock->family == AF_INET6)
             memcpy(&(scan->sock6), sender_sock, sizeof(n2n_sock_t));
-        } else {
-            memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
-            memset(&(scan->sock6), 0, sizeof(n2n_sock_t));  /* No IPv6 yet */
-        }
+        else
+            memset(&(scan->sock6), 0, sizeof(n2n_sock_t));
 
         if (version) {
             strncpy(scan->version, version, sizeof(scan->version) - 1);
@@ -729,23 +726,17 @@ static int update_edge( n2n_sn_t * sss,
         scan->next = sss->edges;
         sss->edges = scan;
 
+        scan->sock     = *sender_sock;  /* IPv4 public (or IPv6 if that's what came in) */
         if (local_sock_ena && local_sock)
             scan->sock_lan = *local_sock;
 
         {
             struct in_addr vip_addr;
             vip_addr.s_addr = htonl(scan->assigned_ip);
-            char addr_buf[64];
-            if (scan->sock.family == AF_INET)
-                sock_to_cstr(addr_buf, &scan->sock);
-            else if (scan->sock6.family == AF_INET6)
-                sock_to_cstr(addr_buf, &scan->sock6);
-            else
-                strcpy(addr_buf, "-");
             traceEvent( TRACE_NORMAL, "update_edge created   %s vip=%s ==> %s%s",
                         macaddr_str( mac_buf, edgeMac ),
                         inet_ntoa(vip_addr),
-                        addr_buf,
+                        sock_to_cstr( sockbuf, &scan->sock ),
                         (scan->sock_lan.family != 0) ? " (LAN)" : "" );
         }
 
@@ -758,34 +749,27 @@ static int update_edge( n2n_sn_t * sss,
         if ( (0 != memcmp(community, scan->community_name, sizeof(n2n_community_t))) ||
              (0 != sock_equal(sender_sock, &(scan->sock) )) )
         {
-            /* Alt-family registration: update the appropriate address slot */
+            /* Alt-family registration: only update the other-family address, don't overwrite primary */
             if (scan->sock.family != 0 && sender_sock->family != scan->sock.family) {
                 if (sender_sock->family == AF_INET6) {
-                    /* IPv6 registration: update sock6 */
                     int had_sock6 = (scan->sock6.family == AF_INET6);
                     memcpy(&scan->sock6, sender_sock, sizeof(n2n_sock_t));
                     scan->last_seen = now;
-                    /* If sock6 was newly learned, return 1 so peers get a fresh PEER_INFO */
+                    /* If sock6 was newly learned, return 1 so peers get a fresh PEER_INFO
+                     * that includes the IPv6 address. */
                     return had_sock6 ? 0 : 1;
-                } else {
-                    /* IPv4 registration: update sock (IPv4 slot) */
-                    int had_sock = (scan->sock.family == AF_INET);
-                    memcpy(&scan->sock, sender_sock, sizeof(n2n_sock_t));
-                    scan->last_seen = now;
-                    /* If IPv4 was newly learned, return 1 so peers get a fresh PEER_INFO */
-                    return had_sock ? 0 : 1;
                 }
+                /* IPv4 alt: primary sock already has IPv4 from main registration */
+                scan->last_seen = now;
+                return 0;
             }
 
             memcpy(scan->community_name, community, sizeof(n2n_community_t) );
-            /* Store address in the correct slot based on family */
-            if (sender_sock->family == AF_INET6) {
+            memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
+            if (sender_sock->family == AF_INET6)
                 memcpy(&(scan->sock6), sender_sock, sizeof(n2n_sock_t));
-                /* Don't clear sock - keep existing IPv4 if any */
-            } else {
-                memcpy(&(scan->sock), sender_sock, sizeof(n2n_sock_t));
-                /* Don't clear sock6 - keep existing IPv6 if any */
-            }
+            else if (scan->sock6.family == 0)
+                memset(&(scan->sock6), 0, sizeof(n2n_sock_t));
 
             if (version) {
                 strncpy(scan->version, version, sizeof(scan->version) - 1);
@@ -907,45 +891,35 @@ static int try_forward( n2n_sn_t * sss,
     if ( NULL != scan )
     {
         ssize_t data_sent_len;
-        n2n_sock_t *target_sock = NULL;
-        
-        /* Prefer IPv4 address, fall back to IPv6 */
-        if (scan->sock.family == AF_INET)
-            target_sock = &scan->sock;
-        else if (scan->sock6.family == AF_INET6)
-            target_sock = &scan->sock6;
-        
-        if (target_sock) {
-            data_sent_len = sendto_sock( sss, target_sock, pktbuf, pktsize );
+        data_sent_len = sendto_sock( sss, &(scan->sock), pktbuf, pktsize );
 
-            if ( data_sent_len == pktsize )
-            {
-                ++(sss->stats.fwd);
-                traceEvent(TRACE_DEBUG, "unicast %lu to [%s] %s",
-                           pktsize,
-                           sock_to_cstr( sockbuf, target_sock ),
-                           macaddr_str(mac_buf, scan->mac_addr));
-            }
-            else
-            {
-                ++(sss->stats.errors);
+        if ( data_sent_len == pktsize )
+        {
+            ++(sss->stats.fwd);
+            traceEvent(TRACE_DEBUG, "unicast %lu to [%s] %s",
+                       pktsize,
+                       sock_to_cstr( sockbuf, &(scan->sock) ),
+                       macaddr_str(mac_buf, scan->mac_addr));
+        }
+        else
+        {
+            ++(sss->stats.errors);
 #ifdef _WIN32
-                DWORD err = WSAGetLastError();
-                W32_ERROR(err, error);
-                traceEvent(TRACE_ERROR, "unicast %lu to [%s] %s FAILED (%d: %ls)",
-                           pktsize,
-                           sock_to_cstr( sockbuf, target_sock ),
-                           macaddr_str(mac_buf, scan->mac_addr),
-                           err, error );
-                W32_ERROR_FREE(error);
+            DWORD err = WSAGetLastError();
+            W32_ERROR(err, error);
+            traceEvent(TRACE_ERROR, "unicast %lu to [%s] %s FAILED (%d: %ls)",
+                       pktsize,
+                       sock_to_cstr( sockbuf, &(scan->sock) ),
+                       macaddr_str(mac_buf, scan->mac_addr),
+                       err, error );
+            W32_ERROR_FREE(error);
 #else
-                traceEvent(TRACE_ERROR, "unicast %lu to [%s] %s FAILED (%d: %s)",
-                           pktsize,
-                           sock_to_cstr( sockbuf, target_sock ),
-                           macaddr_str(mac_buf, scan->mac_addr),
-                           errno, strerror(errno) );
+            traceEvent(TRACE_ERROR, "unicast %lu to [%s] %s FAILED (%d: %s)",
+                       pktsize,
+                       sock_to_cstr( sockbuf, &(scan->sock) ),
+                       macaddr_str(mac_buf, scan->mac_addr),
+                       errno, strerror(errno) );
 #endif
-            }
         }
     }
     else
@@ -957,6 +931,7 @@ static int try_forward( n2n_sn_t * sss,
 
     return 0;
 }
+
 
 /** Try and broadcast a message to all edges in the community.
  *
@@ -981,25 +956,6 @@ static int process_mgmt( n2n_sn_t * sss,
     uint32_t num_edges = 0;
 
     traceEvent( TRACE_DEBUG, "process_mgmt" );
-
-    /* Only allow localhost connections for security */
-    int is_localhost = 0;
-    if (sender_sock->sa_family == AF_INET) {
-        uint32_t addr = ((struct sockaddr_in*)sender_sock)->sin_addr.s_addr;
-        is_localhost = (addr == htonl(INADDR_LOOPBACK)) || (addr == 0);
-    } else if (sender_sock->sa_family == AF_INET6) {
-        struct in6_addr *a6 = &((struct sockaddr_in6*)sender_sock)->sin6_addr;
-        is_localhost = (memcmp(a6, &in6addr_loopback, sizeof(*a6)) == 0);
-    }
-    if (!is_localhost) {
-        char tmp[INET6_ADDRSTRLEN] = "unknown";
-        if (sender_sock->sa_family == AF_INET)
-            inet_ntop(AF_INET, &((struct sockaddr_in*)sender_sock)->sin_addr, tmp, sizeof(tmp));
-        else if (sender_sock->sa_family == AF_INET6)
-            inet_ntop(AF_INET6, &((struct sockaddr_in6*)sender_sock)->sin6_addr, tmp, sizeof(tmp));
-        traceEvent(TRACE_WARNING, "mgmt request from non-localhost %s rejected", tmp);
-        return -1;
-    }
 
     /* Send header */
     ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
@@ -1038,8 +994,6 @@ static int process_mgmt( n2n_sn_t * sss,
     uint32_t displayed_edges = 0;
     for (int i = 0; i < num_communities; i++) {
         /* Community name line with traffic stats on same line */
-        char *comm_name = (char*)communities[i];
-        
         if (sss->traffic_stats_enabled) {
             struct community_stats *cs = sss->comm_stats;
             while (cs && memcmp(cs->community_name, communities[i], sizeof(n2n_community_t)) != 0)
@@ -1051,12 +1005,12 @@ static int process_mgmt( n2n_sn_t * sss,
                 const char *arrow = (cs->instant_Bps > 0) ? "--->" : "    ";
                 ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                                    "%-57s  %s %-7.1f  %-7.1f  %-10.1f\n",
-                                   comm_name, arrow, kbps, gb_24h, gb_30d);
+                                   communities[i], arrow, kbps, gb_24h, gb_30d);
             } else {
-                ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n", comm_name);
+                ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n", communities[i]);
             }
         } else {
-            ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n", comm_name);
+            ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n", communities[i]);
         }
         r = sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
         if (r <= 0) return -1;
@@ -1099,22 +1053,12 @@ static int process_mgmt( n2n_sn_t * sss,
             if (edge->assigned_ip != 0)
                 snprintf(virt_ip, sizeof(virt_ip), "%s", inet_ntoa(a));
 
-            /* Build address string: prefer IPv4, fall back to IPv6 */
-            char addr_buf[64];
-            if (edge->sock.family == AF_INET) {
-                sock_to_cstr(addr_buf, &edge->sock);
-            } else if (edge->sock6.family == AF_INET6) {
-                sock_to_cstr(addr_buf, &edge->sock6);
-            } else {
-                strcpy(addr_buf, "-");
-            }
-
             ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                                "  %2u  %-17s  %-15s  %-47s  %-7s  %s\n",
                                id++,
                                macaddr_str(mac_buf, edge->mac_addr),
                                virt_ip,
-                               addr_buf,
+                               sock_to_cstr(sock_buf, &edge->sock),
                                version,
                                os_name);
 
@@ -1143,7 +1087,6 @@ static int process_mgmt( n2n_sn_t * sss,
                 time_t idle = now - cs->last_active;
                 if (idle < 86400) {
                     /* Offline < 24h: show individually */
-                    char *comm_name = (char*)cs->community_name;
                     if (cs->total_30d > 0) {
                         double kbps  = cs->instant_Bps / 1024.0;
                         double gb24h = cs->last_24h_bytes / (1024.0*1024.0*1024.0);
@@ -1151,10 +1094,10 @@ static int process_mgmt( n2n_sn_t * sss,
                         const char *arrow = (cs->instant_Bps > 0) ? "--->" : "    ";
                         ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE,
                                            "%-57s  %s %-7.1f  %-7.1f  %-10.1f\n",
-                                           comm_name, arrow, kbps, gb24h, gb30d);
+                                           cs->community_name, arrow, kbps, gb24h, gb30d);
                     } else {
                         ressize = snprintf(resbuf, N2N_SN_PKTBUF_SIZE, "%s\n",
-                                           comm_name);
+                                           cs->community_name);
                     }
                     r = sendto(sss->mgmt_sock, resbuf, ressize, 0, sender_sock, sender_sock_len);
                     if (r <= 0) return -1;
@@ -1278,30 +1221,21 @@ static int try_broadcast( n2n_sn_t * sss,
             && (0 != memcmp(srcMac, scan->mac_addr, sizeof(n2n_mac_t)) ) )
         {
             ssize_t data_sent_len;
-            n2n_sock_t *target_sock = NULL;
-            
-            /* Prefer IPv4 address, fall back to IPv6 */
-            if (scan->sock.family == AF_INET)
-                target_sock = &scan->sock;
-            else if (scan->sock6.family == AF_INET6)
-                target_sock = &scan->sock6;
-            
-            if (target_sock) {
-                data_sent_len = sendto_sock(sss, target_sock, pktbuf, pktsize);
 
-                if(data_sent_len != pktsize)
-                {
-                    ++(sss->stats.errors);
-                    /* Error handling code... */
-                }
-                else
-                {
-                    ++(sss->stats.broadcast);
-                    traceEvent(TRACE_DEBUG, "multicast %lu to %s %s",
-                               pktsize,
-                               sock_to_cstr( sockbuf, target_sock ),
-                               macaddr_str( mac_buf, scan->mac_addr));
-                }
+            data_sent_len = sendto_sock(sss, &(scan->sock), pktbuf, pktsize);
+
+            if(data_sent_len != pktsize)
+            {
+                ++(sss->stats.errors);
+                /* Error handling code... */
+            }
+            else
+            {
+                ++(sss->stats.broadcast);
+                traceEvent(TRACE_DEBUG, "multicast %lu to %s %s",
+                           pktsize,
+                           sock_to_cstr( sockbuf, &(scan->sock) ),
+                           macaddr_str( mac_buf, scan->mac_addr));
             }
         }
 
@@ -1605,22 +1539,12 @@ static int process_udp( n2n_sn_t * sss,
                 pi2.sockets[0] = requester->sock;
                 if (pi2.aflags & N2N_AFLAGS_LOCAL_SOCKET)
                     pi2.sockets[1] = requester->sock_lan;
-                if (requester->sock6.family == AF_INET6) {
-                    pi2.aflags |= N2N_AFLAGS_IPV6_SOCKET;
-                    pi2.sock6 = requester->sock6;
-                }
 
                 encode_PEER_INFO( encbuf2, &encx2, &cmn3, &pi2 );
-                /* Send to B via appropriate socket - prefer IPv4, fall back to IPv6 */
-                n2n_sock_t *target_sock = NULL;
-                if (target->sock.family == AF_INET)
-                    target_sock = &target->sock;
-                else if (target->sock6.family == AF_INET6)
-                    target_sock = &target->sock6;
-                
-                if (target_sock && fill_sockaddr((struct sockaddr*)&b_addr, b_len, target_sock) == 0) {
-                    SOCKET send_sock2 = (target_sock->family == AF_INET6) ? sss->sock6 : sss->sock;
-                    socklen_t slen2 = (target_sock->family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+                /* Send to B via appropriate socket */
+                if ( fill_sockaddr((struct sockaddr*)&b_addr, b_len, &target->sock) == 0 ) {
+                    SOCKET send_sock2 = (target->sock.family == AF_INET6) ? sss->sock6 : sss->sock;
+                    socklen_t slen2 = (target->sock.family == AF_INET6) ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
                     sendto( send_sock2, encbuf2, encx2, 0, (struct sockaddr*)&b_addr, slen2 );
                     traceEvent(TRACE_DEBUG, "Simultaneous open: pushed A's addr to B for %s",
                                macaddr_str(mac_buf, query.targetMac));

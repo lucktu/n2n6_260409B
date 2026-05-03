@@ -2,7 +2,7 @@ project(n2n C)
 cmake_minimum_required(VERSION 3.7)
 
 # N2n information
-set(N2N_VERSION 2.3.5.4)
+set(N2N_VERSION 2.3_5.5)
 set(N2N_OSNAME ${CMAKE_SYSTEM_NAME})
 
 add_definitions(-DN2N_VERSION=\"${N2N_VERSION}\" -DN2N_OSNAME=\"${N2N_OSNAME}\")
@@ -129,9 +129,7 @@ add_custom_command(
 endif(DEFINED WIN32)
 
 if(WIN32)
-  target_link_libraries(n2n_core bcrypt iphlpapi ws2_32 dnsapi)
-else()
-  target_link_libraries(n2n_core resolv)
+  target_link_libraries(n2n_core bcrypt iphlpapi ws2_32)
 endif()
 
 # Dead code elimination

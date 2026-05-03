@@ -38,7 +38,6 @@ typedef int socklen_t;
 #  include <netinet/in.h>
 #  include <sys/socket.h>
 #  include <sys/types.h>
-#  include <fcntl.h>
 #  include <netdb.h>
 #endif
 
@@ -504,60 +503,32 @@ static int tcp_request(const char *host, uint16_t port,
     if (sock < 0) { freeaddrinfo(res); return UPNP_ERR_SOCKET; }
 
 #ifdef _WIN32
-    u_long mode = 1;
-    ioctlsocket(sock, FIONBIO, &mode);
-#else
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
-#endif
-
-    int connect_result = connect(sock, res->ai_addr, (socklen_t)res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (connect_result != 0) {
-#ifdef _WIN32
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK) { close(sock); return UPNP_ERR_TIMEOUT; }
-#else
-        if (errno != EINPROGRESS) { close(sock); return UPNP_ERR_TIMEOUT; }
-#endif
-        fd_set wfds;
-        FD_ZERO(&wfds);
-        FD_SET((unsigned)sock, &wfds);
-        struct timeval tv = { UPNP_HTTP_TIMEOUT_SEC, 0 };
-        if (select(sock + 1, NULL, &wfds, NULL, &tv) <= 0) {
-            close(sock); return UPNP_ERR_TIMEOUT;
-        }
-        int sock_err = 0;
-        socklen_t err_len = sizeof(sock_err);
-        getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&sock_err, &err_len);
-        if (sock_err != 0) {
-            close(sock); return UPNP_ERR_TIMEOUT;
-        }
-    }
-
-#ifdef _WIN32
-    mode = 0;
-    ioctlsocket(sock, FIONBIO, &mode);
     DWORD toms = UPNP_HTTP_TIMEOUT_SEC * 1000;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&toms, sizeof(toms));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&toms, sizeof(toms));
 #else
-    fcntl(sock, F_SETFL, flags);
     struct timeval tv = { UPNP_HTTP_TIMEOUT_SEC, 0 };
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 #endif
 
+    if (connect(sock, res->ai_addr, (socklen_t)res->ai_addrlen) != 0) {
+        freeaddrinfo(res); close(sock);
+        return UPNP_ERR_TIMEOUT;
+    }
+    freeaddrinfo(res);
+
+    /* Send full request */
     size_t sent = 0;
     while (sent < req_len) {
         ssize_t n = send(sock, (const char*)request + sent,
                          (int)(req_len - sent), 0);
         if (n < 0) { close(sock); return UPNP_ERR_SOCKET; }
-        if (n == 0) break;
+        if (n == 0) break; /* connection closed by peer */
         sent += (size_t)n;
     }
 
+    /* Receive response */
     size_t total = 0;
     while (total < resp_max - 1) {
         ssize_t n = recv(sock, response + total,
@@ -913,12 +884,8 @@ int upnp_map_port(uint16_t internal_port, uint16_t external_port,
 
 void upnp_unmap_port(uint16_t external_port)
 {
-    struct in_addr gw;
-    if (get_default_gateway(&gw) != 0)
-        return;
     pcp_map(external_port, external_port, NULL, 1);
     natpmp_map(external_port, external_port, NULL, 1);
-    s_ctrl_host[0] = '\0';
     upnp_igd_map(external_port, external_port, NULL, 1);
 }
 

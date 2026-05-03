@@ -25,8 +25,8 @@
 #include "minilzo.h"
 #include <assert.h>
 
-#define PURGE_REGISTRATION_FREQUENCY   60   /* sec: how often to check for expired registrations */
-#define REGISTRATION_TIMEOUT           150  /* sec: expire registrations older than this */
+#define PURGE_REGISTRATION_FREQUENCY   60
+#define REGISTRATION_TIMEOUT           150
 
 
 const uint8_t broadcast_addr[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
